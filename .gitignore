@@ -1,6 +1,5 @@
 venv/
 crack.sh.sha256
-icon.icns
 CrossOverTrialManager.spec
 dist/CrossOverTrialManager
 build/CrossOverTrialManager
