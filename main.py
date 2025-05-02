@@ -5,6 +5,7 @@ import threading
 import time
 import hashlib
 import re
+import sys
 
 import customtkinter as ctk
 from tkinter import messagebox, filedialog, Menu
@@ -15,7 +16,9 @@ from pygments.lexers import BashLexer
 # macOS notifications (optional)
 try:
     from pync import Notifier
-except ImportError:
+    # test instantiation to catch installation errors
+    Notifier("Test message", title="")  # will silently fail if broken
+except Exception:
     Notifier = None
 
 # ── APPLE/CROSSOVER-STYLE THEME ────────────────────────────────────────────────
@@ -80,9 +83,14 @@ LANG = "it"
 TXT = LANGUAGES[LANG]
 
 # ── PATH allo script e checksum ────────────────────────────────────────────────
-SCRIPT_PATH    = os.path.abspath(os.path.expanduser(
-                   "~/Desktop/CrossOver Scripts/crack.sh"))
-CHECKSUM_FILE  = SCRIPT_PATH + ".sha256"
+# determine base path for data files (normal or PyInstaller bundle)
+if getattr(sys, "frozen", False):
+    # running in PyInstaller bundle
+    base_path = sys._MEIPASS
+else:
+    base_path = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_PATH   = os.path.join(base_path, "crack.sh")
+CHECKSUM_FILE = SCRIPT_PATH + ".sha256"
 
 class CrossOverApp(ctk.CTk):
     def __init__(self):
@@ -352,7 +360,10 @@ class CrossOverApp(ctk.CTk):
             self._append_text(f"=== [{arg.upper()}] END ===\n")
             messagebox.showinfo(TXT["done"], f"{TXT[arg]} ✔")
             if Notifier:
-                Notifier.notify(f"{TXT[arg]} ✔", title=TXT["title"])
+                try:
+                    Notifier.notify(f"{TXT[arg]} ✔", title=TXT["title"])
+                except Exception:
+                    pass
         threading.Thread(target=task, daemon=True).start()
 
     # ── ACTION METHODS ─────────────────────────────────────────────────────────
