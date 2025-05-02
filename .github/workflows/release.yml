@@ -1,0 +1,59 @@
+name: Build & Release macOS App
+
+on:
+  push:
+    # scatta solo quando viene pushato un tag semver vMAJOR.MINOR.PATCH
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller customtkinter pillow pygments
+
+      - name: Build macOS .app with PyInstaller
+        run: |
+          pyinstaller \
+            --name "CrossOverTrialManager" \
+            --windowed \
+            --onedir \
+            --icon=icon.icns \
+            --add-data "crack.sh:." \
+            main.py
+
+      - name: Zip the .app bundle
+        working-directory: dist
+        run: |
+          zip -r CrossOverTrialManager-mac-${{ github.ref_name }}.zip CrossOverTrialManager.app
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload .app ZIP to Release
+        uses: actions/upload-release-asset@v2
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: dist/CrossOverTrialManager-mac-${{ github.ref_name }}.zip
+          asset_name: CrossOverTrialManager-mac-${{ github.ref_name }}.zip
+          asset_content_type: application/zip
