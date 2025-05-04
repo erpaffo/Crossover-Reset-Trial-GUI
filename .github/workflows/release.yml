@@ -1,23 +1,25 @@
-name: Build & Release macOS App
+name: Build & Release macOS App (using gh CLI v2)
+
+permissions:
+  contents: write # Necessario per gh release create/upload
 
 on:
   push:
-    # scatta solo quando viene pushato un tag semver vMAJOR.MINOR.PATCH
     tags:
-      - 'v*.*.*'
+      - 'v*.*.*' # Trigger solo su tag semantici
 
 jobs:
   build-and-release:
-    runs-on: macos-latest
+    runs-on: macos-latest # Runner corretto dai log (macos-14-arm64)
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # Usiamo la v5 più recente
         with:
-          python-version: '3.x'
+          python-version: '3.x' # Ha funzionato nei log risolvendo a 3.13.3
 
       - name: Install dependencies
         run: |
@@ -26,34 +28,70 @@ jobs:
 
       - name: Build macOS .app with PyInstaller
         run: |
+          APP_NAME="CrossOverTrialManager"
           pyinstaller \
-            --name "CrossOverTrialManager" \
+            --name "$APP_NAME" \
             --windowed \
             --onedir \
             --icon=icon.icns \
             --add-data "crack.sh:." \
             main.py
 
+      # Combiniamo la preparazione nome/percorso e lo zipping
       - name: Zip the .app bundle
-        working-directory: dist
+        id: zip_app # ID per referenziare gli output
         run: |
-          zip -r CrossOverTrialManager-mac-${{ github.ref_name }}.zip CrossOverTrialManager.app
+          APP_NAME="CrossOverTrialManager"
+          TAG=${{ github.ref_name }} # Es: v1.0.0
+          ZIP_NAME="${APP_NAME}-mac-${TAG}.zip"
+          # Percorso relativo dove PyInstaller mette l'output e dove creiamo lo zip
+          BUILD_DIR="dist"
+          ZIP_PATH="${BUILD_DIR}/${ZIP_NAME}" # Percorso relativo al file zip finale
 
-      - name: Create GitHub Release
-        id: create_release
-        uses: actions/create-release@v1
-        with:
-          tag_name: ${{ github.ref_name }}
-          release_name: Release ${{ github.ref_name }}
-          draft: false
-          prerelease: false
+          echo "App Name: ${APP_NAME}"
+          echo "Tag: ${TAG}"
+          echo "Zip Name: ${ZIP_NAME}"
+          echo "Zip Path: ${ZIP_PATH}"
+          echo "Build Dir: ${BUILD_DIR}"
+
+          echo "Creating zip file: ${ZIP_NAME} in ${BUILD_DIR}/ directory"
+          # Andiamo nella directory di build per creare lo zip
+          cd "${BUILD_DIR}"
+          echo "Current directory: $(pwd)"
+          echo "Files in directory:"
+          ls -la # Lista file per debug prima dello zip
+
+          # Creiamo lo zip
+          zip -r "${ZIP_NAME}" "${APP_NAME}.app"
+
+          # Torniamo indietro alla directory principale del workspace
+          cd ..
+          echo "Current directory after cd ..: $(pwd)"
+
+          echo "Checking if zip file exists at ${ZIP_PATH}"
+          ls -l "${ZIP_PATH}" # Verifichiamo che lo zip esista
+
+          # Impostiamo gli output per lo step successivo con gh
+          echo "zip_path=${ZIP_PATH}" >> $GITHUB_OUTPUT
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
+      - name: Create Release and Upload Asset with GitHub CLI
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # gh usa questo token
+        run: |
+          echo "Creating release for tag ${{ steps.zip_app.outputs.tag }}"
+          # Crea la release, usando --generate-notes per note automatiche
+          # o sostituisci con --notes "Tue note qui" per note manuali.
+          gh release create ${{ steps.zip_app.outputs.tag }} \
+             --repo ${{ github.repository }} \
+             --title "Release ${{ steps.zip_app.outputs.tag }}" \
+             --generate-notes \
+             --draft=false \
+             --prerelease=false
 
-      - name: Upload .app ZIP to Release
-        uses: actions/upload-release-asset@v1
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: dist/CrossOverTrialManager-mac-${{ github.ref_name }}.zip
-          asset_name: CrossOverTrialManager-mac-${{ github.ref_name }}.zip
-          asset_content_type: application/zip
+          echo "Uploading asset ${{ steps.zip_app.outputs.zip_path }}"
+          # Carica l'asset sulla release appena creata
+          gh release upload ${{ steps.zip_app.outputs.tag }} \
+             ${{ steps.zip_app.outputs.zip_path }} \
+             --repo ${{ github.repository }} \
+             --clobber # Sovrascrive l'asset se esiste già
