@@ -33,3 +33,7 @@ To reset verification, delete `crack.sh.sha256` and restart the app—this will 
 ## Requirements
 
 See `requirements.txt` for the full list of Python packages.
+
+## Acknowledgements
+
+The trial reset script (`crack.sh`) is adapted from the original work by [@repsejnworb](https://github.com/repsejnworb) found in [this Gist](https://gist.github.com/repsejnworb/84d3e0852cf90ef40edf7e9c060f193b). Thanks for the foundation!
