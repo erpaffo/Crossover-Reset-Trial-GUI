@@ -29,6 +29,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
+      
+      - name: List files and Build macOS .app with PyInstaller # Modifica questo step
+        run: |
+          APP_NAME="CrossOverTrialManager"
+          echo "--- Listing files in current directory before build ---"
+          ls -la # Aggiunto per debug: verifica che i file ci siano
+          echo "--- Running PyInstaller ---"
+          # Comando PyInstaller su una singola riga logica:
+          pyinstaller --name "$APP_NAME" --windowed --onedir --icon=icon.icns --add-data "VERSION:." --add-data "logo.png:." --add-data "script.sh:." main.py
+          echo "--- PyInstaller finished ---"
 
       - name: Build macOS .app with PyInstaller
         run: |
