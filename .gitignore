@@ -1,5 +1,5 @@
 venv/
-crack.sh.sha256
+script.sh.sha256
 CrossOverTrialManager.spec
 dist/CrossOverTrialManager
 build/CrossOverTrialManager
