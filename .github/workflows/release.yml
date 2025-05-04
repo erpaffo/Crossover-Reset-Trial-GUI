@@ -1,90 +1,95 @@
 name: Build & Release macOS App (Optimized)
 
+# Permissions needed for gh release commands
 permissions:
   contents: write
 
 on:
   push:
     tags:
+      # Trigger the workflow when tags matching vX.Y.Z are pushed
       - 'v*.*.*'
 
 jobs:
   build-and-release:
+    # Use the latest available macOS runner
     runs-on: macos-latest
 
     steps:
+      # Step 1: Check out the repository code at the specific tag
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Step 2: Set up the specified Python version
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          # Specifica una versione precisa per riproducibilità
-          python-version: '3.11'
-          # Abilita il caching delle dipendenze pip
-          cache: 'pip'
+          python-version: '3.11' # Pinning the Python version
+          cache: 'pip'          # Enable caching for pip dependencies
 
+      # Step 3: Install Python dependencies
       - name: Install dependencies from requirements.txt
         run: |
           python -m pip install --upgrade pip
+          # Install dependencies listed in requirements.txt
           pip install -r requirements.txt
+          # Ensure PyInstaller is installed (can also be in requirements.txt)
           pip install pyinstaller
-      
-      - name: List files and Build macOS .app with PyInstaller # Modifica questo step
+
+      # Step 4: List files for debugging and build the .app bundle
+      - name: List files and Build macOS .app with PyInstaller
         run: |
           APP_NAME="CrossOverTrialManager"
           echo "--- Listing files in current directory before build ---"
-          ls -la # Aggiunto per debug: verifica che i file ci siano
+          ls -la # List files to confirm presence (VERSION, main.py, etc.)
           echo "--- Running PyInstaller ---"
-          # Comando PyInstaller su una singola riga logica:
+          # Single-line PyInstaller command including necessary data files
           pyinstaller --name "$APP_NAME" --windowed --onedir --icon=icon.icns --add-data "VERSION:." --add-data "logo.png:." --add-data "script.sh:." main.py
           echo "--- PyInstaller finished ---"
 
-      - name: Build macOS .app with PyInstaller
-        run: |
-          APP_NAME="CrossOverTrialManager"
-          # Potresti anche eseguire pyinstaller NomeTuoFile.spec se ne usi uno
-          pyinstaller \
-            --name "$APP_NAME" \
-            --windowed \
-            --onedir \
-            --icon=icon.icns \  
-            --add-data "VERSION:." \
-            --add-data "logo.png:." \
-            --add-data "script.sh:." \
-            main.py
-
+      # Step 5: Perform ad-hoc code signing (allows running on macOS with Gatekeeper bypass)
       - name: Ad-Hoc Sign the Application
         run: |
           APP_NAME="CrossOverTrialManager"
           APP_PATH="dist/${APP_NAME}.app"
           echo "Performing ad-hoc signing on ${APP_PATH}"
+          # Use '-' for ad-hoc signing identity
           codesign --force --deep -s - "${APP_PATH}"
           echo "Ad-hoc signing complete."
 
+      # Step 6: Create a ZIP archive of the signed .app bundle
       - name: Zip the Ad-Hoc Signed .app bundle
-        id: zip_app
+        id: zip_app # Give this step an ID to reference its outputs
         run: |
           APP_NAME="CrossOverTrialManager"
+          # Get the tag name that triggered the workflow (e.g., v1.1.0)
           TAG=${{ github.ref_name }}
+          # Construct the ZIP filename using the tag
           ZIP_NAME="${APP_NAME}-mac-${TAG}.zip"
           BUILD_DIR="dist"
           ZIP_PATH="${BUILD_DIR}/${ZIP_NAME}"
 
           echo "Zipping ad-hoc signed app into ${ZIP_NAME}"
+          # Change directory to 'dist' to avoid including parent folders in zip
           cd "${BUILD_DIR}"
+          # Create the recursive zip archive
           zip -r "${ZIP_NAME}" "${APP_NAME}.app"
+          # Change back to the root directory
           cd ..
 
+          # Set outputs for use in later steps
           echo "zip_path=${ZIP_PATH}" >> $GITHUB_OUTPUT
           echo "zip_name=${ZIP_NAME}" >> $GITHUB_OUTPUT
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
 
+      # Step 7: Create a GitHub Release and upload the ZIP file as an asset
       - name: Create Release and Upload Ad-Hoc Signed Asset
         env:
+          # Use the automatically provided GITHUB_TOKEN for authentication
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Creating release for tag ${{ steps.zip_app.outputs.tag }}"
+          # Use the GitHub CLI (gh) to create the release
           gh release create ${{ steps.zip_app.outputs.tag }} \
              --repo ${{ github.repository }} \
              --title "Release ${{ steps.zip_app.outputs.tag }}" \
@@ -93,7 +98,8 @@ jobs:
              --prerelease=false
 
           echo "Uploading ad-hoc signed asset ${{ steps.zip_app.outputs.zip_path }}"
+          # Use the GitHub CLI (gh) to upload the asset to the created release
           gh release upload ${{ steps.zip_app.outputs.tag }} \
              ${{ steps.zip_app.outputs.zip_path }} \
              --repo ${{ github.repository }} \
-             --clobber
+             # --clobber # Uncomment if you want to overwrite existing assets with the same name
