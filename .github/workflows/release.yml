@@ -55,7 +55,7 @@ jobs:
         run: |
           APP_NAME="CrossOverTrialManager"
           TAG=${{ github.ref_name }}
-          ZIP_NAME="${APP_NAME}-mac-${TAG}_adhoc_signed.zip"
+          ZIP_NAME="${APP_NAME}-mac-${TAG}.zip"
           BUILD_DIR="dist"
           ZIP_PATH="${BUILD_DIR}/${ZIP_NAME}"
 

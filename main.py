@@ -126,7 +126,10 @@ def notify(title: str, message: str):
 # --- Settings Persistence ---
 def load_settings() -> dict:
     """Loads settings from config.json, returning defaults if missing or invalid."""
-    defaults = {"dark_mode": None}
+    defaults = {
+        "dark_mode": None,
+        "check_updates_on_startup": None # None = Ask user on first launch
+    }
     try:
         if not os.path.exists(CONFIG_FILE):
             return defaults
@@ -134,16 +137,23 @@ def load_settings() -> dict:
             settings = json.load(f)
             if not isinstance(settings, dict):
                  raise ValueError("Config content is not a dictionary")
+
             final_settings = defaults.copy()
-            final_settings.update(settings)
+            final_settings.update(settings) # Overwrite defaults with loaded values
+
+            # Validate specific keys
             if "dark_mode" in final_settings and not isinstance(final_settings["dark_mode"], (bool, type(None))):
-                 logging.warning(f"Invalid type for 'dark_mode' in settings, using default.")
+                 logging.warning("Invalid type for 'dark_mode' in settings, using default.")
                  final_settings["dark_mode"] = defaults["dark_mode"]
+            if "check_updates_on_startup" in final_settings and not isinstance(final_settings["check_updates_on_startup"], (bool, type(None))):
+                 logging.warning("Invalid type for 'check_updates_on_startup', using default.")
+                 final_settings["check_updates_on_startup"] = defaults["check_updates_on_startup"]
+
             return final_settings
     except (json.JSONDecodeError, IOError, ValueError) as e:
         logging.error(f"Error loading or parsing config file {CONFIG_FILE}: {e}. Using defaults.")
         return defaults
-
+    
 def save_settings(settings: dict):
     """Saves the provided settings dictionary to config.json."""
     try:
@@ -268,6 +278,7 @@ class CrossOverApp(ctk.CTk):
 
     # Dentro la classe CrossOverApp:
     def __init__(self):
+        """Initializes the main application window, UI, and state."""
         super().__init__()
 
         # --- Initialize instance variables ---
@@ -277,7 +288,7 @@ class CrossOverApp(ctk.CTk):
         self.current_action = None
         self.service_active = False
         self.bottles_path_override = None
-        self.settings = current_settings
+        self.settings = current_settings # Use globally loaded settings
 
         # --- Window Setup ---
         self.title(TXT["title"])
@@ -289,10 +300,12 @@ class CrossOverApp(ctk.CTk):
         # --- UI Variables ---
         self.lang_var = ctk.StringVar(value=TXT["name"]) # TODO: Set from settings
         self.mode_var = ctk.BooleanVar(value=(ctk.get_appearance_mode() == "Dark"))
+        self.update_check_on_startup_var = ctk.BooleanVar(
+            value=bool(self.settings.get("check_updates_on_startup", False))
+        )
 
         # --- Actions Definition ---
         self.actions = [
-            # ... (action list remains the same) ...
             {"key": "execute",   "cmd": self.execute_reset,       "color": BTN_PRIMARY_FG},
             {"key": "install",   "cmd": self.install_service,     "color": BTN_SECONDARY_FG},
             {"key": "uninstall", "cmd": self.uninstall_service,   "color": BTN_DANGER_FG},
@@ -301,20 +314,32 @@ class CrossOverApp(ctk.CTk):
             {"key": "export",    "cmd": self.export_log,          "color": BTN_PRIMARY_FG},
             {"key": "clear",     "cmd": self.clear_log,           "color": BTN_PRIMARY_FG},
             {"key": "help",      "cmd": self.show_help,           "color": BTN_PRIMARY_FG},
-        ] 
+        ]
         self.action_buttons = {}
         self.badges = {}
 
-        # --- Build UI (should be relatively fast) ---
+        # --- Build UI ---
         self._create_menu()
-        self._create_ui_layout()
+        self._create_ui_layout() # Builds widgets
 
         # --- Initialize Log List & Colors ---
         self.full_log = []
-        self._update_ui_colors() 
+        self._update_ui_colors() # Apply colors to widgets
 
         # --- Start Log Queue Processor ---
         self.after(100, self._process_log_queue)
+
+        # --- Delayed Startup Update Check ---
+        # Check setting AFTER the main window might be ready
+        if self.settings.get("check_updates_on_startup") is True:
+             logging.info("Automatic update check on startup enabled. Scheduling check.")
+             # Schedule check after a delay to avoid blocking UI init
+             self.after(3000, self.check_for_updates_threaded)
+        else:
+             logging.info("Automatic update check on startup disabled or not set.")
+
+        # Initial local checks (checksum, service status) are now run
+        # in the __main__ block after the splash screen is shown.
 
     # --- UI Creation Methods ---
     def _create_ui_layout(self):
@@ -390,6 +415,12 @@ class CrossOverApp(ctk.CTk):
         settings_menu.add_checkbutton(label=TXT.get("menu_dark_mode", "Dark Mode"),
                                       variable=self.mode_var, command=self.toggle_mode)
 
+        settings_menu.add_checkbutton(
+            label=TXT.get("menu_check_updates_startup", "Check for Updates on Startup"),
+            variable=self.update_check_on_startup_var,
+            command=self.toggle_startup_update_check
+        )
+
         language_menu = Menu(settings_menu, tearoff=0)
         settings_menu.add_cascade(label=TXT.get("menu_language", "Language"), menu=language_menu)
         for code, d in LANGUAGES.items():
@@ -400,6 +431,16 @@ class CrossOverApp(ctk.CTk):
         settings_menu.add_separator()
         settings_menu.add_command(label=TXT.get("menu_check_updates", "Check for Updates..."),
                                   command=self.check_for_updates_threaded)
+
+
+    def toggle_startup_update_check(self):
+        """Toggles the setting for checking updates on startup and saves it."""
+        new_value = self.update_check_on_startup_var.get()
+        self.settings["check_updates_on_startup"] = new_value
+        save_settings(self.settings)
+        logging.info(f"Check for updates on startup {'enabled' if new_value else 'disabled'}.")
+
+
 
     # --- UI Update & State Methods ---
     def _create_badges(self, parent_button, action_key):
@@ -586,6 +627,7 @@ class CrossOverApp(ctk.CTk):
                 messagebox.showerror(TXT["error_title"], log_msg)
                 self.update_status_bar(f"Export failed: {e}")
 
+
     # --- Script/System Interaction Methods ---
     def _check_script_status(self):
         """Checks script existence, executability, and checksum."""
@@ -711,26 +753,64 @@ class CrossOverApp(ctk.CTk):
 
     def update_status_bar(self, message=None, is_update_status=False):
         """Updates the status bar text and checksum status."""
-        if not hasattr(self, "status_label"): return # Avoid error if called before UI ready
+        # Ensure UI elements exist before proceeding
+        if not hasattr(self, "status_label") or not self.status_label.winfo_exists():
+            logging.warning("update_status_bar called but status_label does not exist.")
+            return
 
-        if message and not is_update_status:
+        # --- Logic for the main status label ---
+        if is_update_status and message:
+            # If it's an update status message, always display it directly.
             self.status_label.configure(text=message)
+        elif message:
+            # A specific, non-update message was provided. Display it.
+            self.status_label.configure(text=message)
+            # Setting a general message often implies no specific action is running anymore.
+            # self.current_action = None # Optional: Uncomment if setting a message should clear the action state
+        elif self.current_action and self.current_action in TXT: # Check if key exists!
+            # An action is running, and it has a translation defined in TXT.
+            action_text = TXT.get(self.current_action, self.current_action) # Get translated name or key itself as fallback
+            try:
+                status_running_msg = TXT["status_running"].format(action=action_text)
+                self.status_label.configure(text=status_running_msg)
+            except KeyError:
+                logging.error(f"Key 'status_running' missing in the current language dictionary (LANG='{LANG}')")
+                self.status_label.configure(text=f"Running {action_text}...") # Fallback text
         elif self.current_action:
-            self.status_label.configure(text=TXT["status_running"].format(action=TXT[self.current_action]))
-        elif not is_update_status:
-            self.status_label.configure(text=TXT["status_ready"])
+            # An action is running, but it doesn't have a direct translation (like 'update').
+            # Show a generic message or fallback. Avoid KeyError.
+            logging.warning(f"Action '{self.current_action}' running but not found in TXT dictionary.")
+            self.status_label.configure(text=f"Running action: {self.current_action}...") # Simple fallback
+        else:
+            # Default to "Ready" if no action and no specific message.
+            self.status_label.configure(text=TXT.get("status_ready", "Ready.")) # Use .get for safety
 
-        # Update checksum status unless update progress bar is visible
-        if not (hasattr(self, "update_progress_bar") and self.update_progress_bar.winfo_ismapped()):
+        # --- Logic for the checksum status label ---
+        # Check if update progress bar exists and is visible
+        update_bar_visible = (hasattr(self, "update_progress_bar") and
+                            self.update_progress_bar.winfo_exists() and
+                            self.update_progress_bar.winfo_ismapped())
+
+        if not update_bar_visible:
+            # Update checksum status only if update bar is hidden
             cs_text, cs_color = "", COLOR_TEXT_LIGHT # Default colors based on theme
             if self.checksum_valid is True:
-                cs_text, cs_color = TXT["status_checksum_ok"], TAG_COLORS["SUCCESS"]
+                cs_text, cs_color = TXT.get("status_checksum_ok", "Checksum OK"), TAG_COLORS.get("SUCCESS", "green")
             elif self.checksum_valid is False:
-                cs_text, cs_color = TXT["status_checksum_err"], TAG_COLORS["ERROR"]
-            else: # None
-                cs_text = TXT["status_script_not_found"] if not self.script_found else TXT["status_checksum_na"]
-                cs_color = TAG_COLORS["ERROR"] if not self.script_found else TAG_COLORS["WARNING"]
-            self.checksum_status_label.configure(text=cs_text, text_color=cs_color)
+                cs_text, cs_color = TXT.get("status_checksum_err", "Checksum ERROR"), TAG_COLORS.get("ERROR", "red")
+            else: # None or other state
+                cs_text = TXT.get("status_script_not_found", "Script missing") if not self.script_found else TXT.get("status_checksum_na", "Checksum N/A")
+                cs_color = TAG_COLORS.get("ERROR", "red") if not self.script_found else TAG_COLORS.get("WARNING", "orange")
+
+            # Check if checksum_status_label exists before configuring
+            if hasattr(self, "checksum_status_label") and self.checksum_status_label.winfo_exists():
+                # Determine actual text color based on theme if color key not found
+                default_text_color = COLOR_TEXT_DARK if ctk.get_appearance_mode() == "Dark" else COLOR_TEXT_LIGHT
+                final_cs_color = cs_color if cs_color in [TAG_COLORS.get("SUCCESS"), TAG_COLORS.get("ERROR"), TAG_COLORS.get("WARNING")] else default_text_color
+                self.checksum_status_label.configure(text=cs_text, text_color=final_cs_color)
+        elif hasattr(self, "checksum_status_label") and self.checksum_status_label.winfo_exists():
+            # Optionally clear checksum status when update is running
+            self.checksum_status_label.configure(text="")
 
     def _set_ui_busy(self, busy: bool, action_key: str):
         """Disables/enables UI controls and shows/hides action progress bar."""
@@ -944,10 +1024,15 @@ class CrossOverApp(ctk.CTk):
         thread = threading.Thread(target=self.check_for_updates, daemon=True)
         thread.start()
 
+# Dentro la classe CrossOverApp
+
     def _update_progress_ui(self, value=None, text=None, indeterminate=False):
         """Helper to update the update progress bar and status label (thread-safe)."""
         def update():
-            if not hasattr(self, "update_progress_bar"): return
+            if not self.winfo_exists() or not hasattr(self, "update_progress_bar") or not self.update_progress_bar.winfo_exists():
+                logging.debug("Update progress UI callback: Target widget destroyed. Aborting.")
+                return
+
             progress_bar = self.update_progress_bar
 
             if value is not None:
@@ -955,28 +1040,42 @@ class CrossOverApp(ctk.CTk):
                 progress_bar.set(value)
                 if indeterminate:
                     progress_bar.configure(mode="indeterminate")
-                    if not progress_bar.is_running: progress_bar.start()
+                    progress_bar.start() # Rimosso check is_running
                 else:
-                     progress_bar.configure(mode="determinate")
-                     if progress_bar.is_running: progress_bar.stop()
+                    progress_bar.configure(mode="determinate")
+                    progress_bar.stop() # Rimosso check is_running
             else:
                 # Hide progress bar
-                if progress_bar.is_running: progress_bar.stop()
+                progress_bar.stop() # Rimosso check is_running
                 progress_bar.grid_remove()
 
             if text is not None:
-                self.update_status_bar(text, is_update_status=True)
+                # Check status_label exists before configuring
+                if hasattr(self, "status_label") and self.status_label.winfo_exists():
+                    self.update_status_bar(text, is_update_status=True)
+                else:
+                    logging.debug("Update progress UI callback: Status label destroyed.")
 
-        if hasattr(self, 'after'): # Ensure widget exists
-             self.after(0, update)
-
+        # Schedule update only if main window exists
+        if hasattr(self, 'after') and self.winfo_exists():
+            self.after(0, update)
+        else:
+            logging.debug("Update progress UI: Main window destroyed before scheduling callback.")
+    
     def check_for_updates(self):
-        """Checks GitHub for updates and guides user through manual update."""
+        """
+        Checks GitHub for updates. If found and newer, downloads the zip asset
+        to the user's Downloads folder, extracts it, and prompts the user
+        to launch the new version (quitting the current one).
+        """
         logging.info("Checking for updates...")
         self._update_progress_ui(0, TXT.get("update_status_checking", "Checking for updates..."), indeterminate=True)
-        update_performed_or_not_needed = False
+        update_zip_path = None
+        extracted_app_path = None
+        tmpdir_extraction = None # Sub-directory within Downloads
 
         try:
+            # 1. Get latest release info from GitHub API
             api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
             resp = requests.get(api_url, timeout=15)
             resp.raise_for_status()
@@ -985,120 +1084,141 @@ class CrossOverApp(ctk.CTk):
             logging.info(f"Latest release tag from GitHub: {latest_tag}")
             latest_version_str = latest_tag.lstrip('v')
 
+            # 2. Compare versions
             try:
                 gh_version = parse_version(latest_version_str)
                 local_version = parse_version(__version__)
                 logging.info(f"Comparing GitHub version {gh_version} with local version {local_version}")
 
                 if gh_version <= local_version:
-                    update_performed_or_not_needed = True # Includes up-to-date and newer local cases
-                    if gh_version == local_version:
-                        logging.info("Local version is already up to date.")
-                        messagebox.showinfo(
-                            TXT.get("update_up_to_date_title", "Up to Date"),
-                            TXT.get("update_up_to_date_msg", "...").format(current_version=__version__)
-                        )
-                    else: # gh_version < local_version
-                        logging.info(f"Local version {local_version} is newer than latest release {gh_version}.")
-                        messagebox.showinfo(
-                            TXT.get("update_newer_local_title", "Development Version"),
-                            TXT.get("update_newer_local_msg", "...").format(local_version=__version__, gh_version=latest_version_str)
-                        )
-                    return # Exit update check function
+                    msg_key = "update_up_to_date_msg" if gh_version == local_version else "update_newer_local_msg"
+                    title_key = "update_up_to_date_title" if gh_version == local_version else "update_newer_local_title"
+                    log_msg = "Local version is up to date." if gh_version == local_version else f"Local version {local_version} is newer than release {gh_version}."
+                    logging.info(log_msg)
+                    messagebox.showinfo(
+                        TXT.get(title_key, "Info"),
+                        TXT.get(msg_key, "...").format(current_version=__version__, local_version=__version__, gh_version=latest_version_str)
+                    )
+                    return # Exit update check
 
             except Exception as e:
-                logging.error(f"Error comparing versions ('{latest_version_str}' vs '{__version__}'): {e}")
-                messagebox.showerror(TXT.get("update_error_title", "Update Error"), f"Error comparing versions:\n{e}")
-                return
+                 logging.error(f"Error comparing versions ('{latest_version_str}' vs '{__version__}'): {e}")
+                 messagebox.showerror(TXT.get("update_error_title", "Update Error"), f"Error comparing versions:\n{e}")
+                 return
 
-            # --- Ask user if gh_version > local_version ---
+            # 3. Ask user to proceed with download
             if not messagebox.askyesno(
                 TXT.get("update_available_title", "Update Available"),
-                TXT.get("update_ask_install", "...").format(new_version=latest_version_str)
+                TXT.get("update_ask_install", "Version {new_version} available. Download now?") # Adjusted text slightly
+                   .format(new_version=latest_version_str)
             ):
-                update_performed_or_not_needed = True # User chose not to update
-                return
+                return # User cancelled download
 
-            # --- Proceed with download ---
+            # 4. Find suitable ZIP asset
             assets = data.get("assets", [])
-            zip_asset = next((a for a in assets if a["name"].endswith(f"-{latest_tag}.zip")), None) \
+            expected_zip_name_pattern = f"{APP_NAME}-mac-{latest_tag}"
+            zip_asset = next((a for a in assets if expected_zip_name_pattern in a["name"] and a["name"].endswith(".zip")), None) \
                         or next((a for a in assets if a["name"].endswith(".zip")), None)
-            if not zip_asset: raise ValueError(TXT.get("update_no_zip", "..."))
-
+            if not zip_asset: raise ValueError(TXT.get("update_no_zip", "No ZIP asset found."))
             zip_url = zip_asset["browser_download_url"]
             zip_size = zip_asset.get("size", 0)
-            logging.info(f"Found update asset: {zip_asset['name']} ({zip_size} bytes)")
+            zip_filename = zip_asset["name"]
+            logging.info(f"Found update asset: {zip_filename} ({zip_size} bytes)")
 
-            self._update_progress_ui(0, TXT.get("update_status_downloading", "...").format(percent=0))
-            tmpdir = tempfile.mkdtemp(prefix=f"{APP_NAME}_update_")
+            # 5. Download to user's Downloads folder
+            downloads_path = os.path.expanduser("~/Downloads")
+            update_zip_path = os.path.join(downloads_path, zip_filename)
+            logging.info(f"Downloading update to: {update_zip_path}")
+            self._update_progress_ui(0, TXT.get("update_status_downloading", "Downloading ({percent:.0f}%)...").format(percent=0))
             downloaded_bytes = 0
-            content_buffer = io.BytesIO()
 
-            try:
-                with requests.get(zip_url, stream=True, timeout=120) as r:
-                    r.raise_for_status()
-                    chunk_size = 8192 * 4 # Increased chunk size
+            with requests.get(zip_url, stream=True, timeout=120) as r:
+                r.raise_for_status()
+                with open(update_zip_path, "wb") as f:
+                    chunk_size = 8192 * 4
                     for chunk in r.iter_content(chunk_size=chunk_size):
-                        content_buffer.write(chunk)
-                        downloaded_bytes += len(chunk)
-                        if zip_size > 0:
-                            percent = (downloaded_bytes / zip_size) * 100
-                            self._update_progress_ui(downloaded_bytes / zip_size,
-                                                     TXT.get("update_status_downloading", "...").format(percent=percent))
-                        else:
-                            self._update_progress_ui(0, TXT.get("update_downloading", "..."), indeterminate=True)
+                        if chunk:
+                            f.write(chunk)
+                            downloaded_bytes += len(chunk)
+                            if zip_size > 0:
+                                percent = (downloaded_bytes / zip_size) * 100
+                                self._update_progress_ui(downloaded_bytes / zip_size,
+                                                         TXT.get("update_status_downloading", "...").format(percent=percent))
+                            else:
+                                self._update_progress_ui(0, TXT.get("update_downloading", "..."), indeterminate=True)
 
-                self._update_progress_ui(1.0, TXT.get("update_status_installing", "..."), indeterminate=True)
-                content_buffer.seek(0)
-                with zipfile.ZipFile(content_buffer) as z:
-                    z.extractall(tmpdir)
-                logging.info(f"Extracted update to {tmpdir}")
+            logging.info(f"Download complete: {update_zip_path}")
+            self._update_progress_ui(1.0, TXT.get("done", "Done!")) # Show 100% briefly
 
-                # --- Instruct Manual Update ---
-                src_app_name = f"{APP_NAME}.app"
-                dst_app_path_guess = os.path.join("/Applications", src_app_name)
-                logging.warning("Self-replacement skipped. Instructing manual update.")
-                messagebox.showinfo(
-                    TXT.get("update_success_title", "Updated"),
-                    f"Update downloaded and extracted to:\n{tmpdir}\n\n"
-                    f"Please close this application and replace it\n"
-                    f"(likely at {dst_app_path_guess})\n"
-                    f"with the new '{src_app_name}' found in the folder above."
-                )
-                # Open the temp folder in Finder to help the user
-                try: subprocess.run(['open', tmpdir])
-                except Exception as open_err: logging.error(f"Could not open folder {tmpdir}: {open_err}")
+            # 6. Ask user to extract and launch the new version
+            if not messagebox.askyesno(
+                TXT.get("update_download_complete_title", "Download Complete"),
+                TXT.get("update_download_complete_ask_launch", "Update downloaded. Extract and launch new version?")
+            ):
+                logging.info("User chose not to launch the new version now.")
+                return
 
-                update_performed_or_not_needed = True # Update downloaded, user action required
+            # 7. Extract zip to a subfolder in Downloads
+            self._update_progress_ui(1.0, TXT.get("update_extracting_launching", "Extracting..."), indeterminate=True)
+            extract_folder_name = f"{APP_NAME} Update {latest_version_str}"
+            tmpdir_extraction = os.path.join(downloads_path, extract_folder_name)
 
-            finally: # Cleanup temp dir unless user needs it
-                if update_performed_or_not_needed and os.path.exists(tmpdir) and "Please close" not in messagebox._show.last_message["message"]:
-                    # Example condition: cleanup only if user didn't get the manual instruction
-                    # Or simply always leave it and let user cleanup manually if manual update is needed.
-                     try:
-                          shutil.rmtree(tmpdir)
-                          logging.info(f"Cleaned up temp directory: {tmpdir}")
-                     except Exception as cleanup_err:
-                          logging.error(f"Error cleaning up temp directory {tmpdir}: {cleanup_err}")
-                elif os.path.exists(tmpdir):
-                     logging.info(f"Leaving temp directory for manual update: {tmpdir}")
+            if os.path.exists(tmpdir_extraction):
+                 logging.warning(f"Removing previous extraction directory: {tmpdir_extraction}")
+                 shutil.rmtree(tmpdir_extraction)
+            os.makedirs(tmpdir_extraction, exist_ok=True)
 
+            logging.info(f"Extracting {update_zip_path} to {tmpdir_extraction}")
+            with zipfile.ZipFile(update_zip_path, 'r') as zip_ref:
+                zip_ref.extractall(tmpdir_extraction)
 
+            # Find the path to the extracted .app bundle
+            extracted_app_name = f"{APP_NAME}.app"
+            extracted_app_path = os.path.join(tmpdir_extraction, extracted_app_name)
+            if not os.path.isdir(extracted_app_path): # Check if it's a directory
+                found_apps = [d for d in os.listdir(tmpdir_extraction) if d.endswith(".app") and os.path.isdir(os.path.join(tmpdir_extraction, d))]
+                if found_apps:
+                    extracted_app_path = os.path.join(tmpdir_extraction, found_apps[0])
+                    logging.warning(f"App name mismatch, launching found app: {found_apps[0]}")
+                else:
+                    raise FileNotFoundError(f"Could not find extracted '.app' bundle in {tmpdir_extraction}")
+
+            logging.info(f"Extraction complete. Found app at: {extracted_app_path}")
+
+            # 8. Launch the new app using 'open' command and quit the current one
+            logging.info(f"Attempting to launch: {extracted_app_path}")
+            try:
+                subprocess.run(['open', extracted_app_path], check=True)
+                logging.info("Successfully launched the new application via 'open'.")
+                self.after(500, self.quit) # Quit current app after a short delay
+            except Exception as launch_err:
+                 logging.exception("Failed to launch the new application using 'open'.")
+                 messagebox.showerror(
+                     TXT.get("update_launch_error_title", "Launch Error"),
+                     TXT.get("update_launch_error_msg", "Could not launch. Check Downloads.") + f"\n\nError: {launch_err}"
+                 )
+
+        # --- Error Handling ---
         except requests.exceptions.RequestException as e:
-            logging.error(f"Network error during update check: {e}")
-            messagebox.showerror(TXT.get("update_error_title", "Update Error"), f"Network error:\n{e}")
-        except (zipfile.BadZipFile, ValueError, FileNotFoundError, OSError) as e:
-            logging.error(f"Error during update process: {e}")
-            messagebox.showerror(TXT.get("update_error_title", "Update Error"), f"Error during update:\n{e}")
+             logging.error(f"Network error during update check: {e}")
+             messagebox.showerror(TXT.get("update_error_title", "Update Error"), f"Network error:\n{e}")
+        except (zipfile.BadZipFile, ValueError, FileNotFoundError, OSError, PermissionError) as e:
+             logging.error(f"Error during update file operation: {e}")
+             messagebox.showerror(TXT.get("update_error_title", "Update Error"), f"File operation error:\n{e}")
         except Exception as e:
-            logging.exception("Unexpected error during update check.")
-            messagebox.showerror(TXT.get("update_error_title", "Update Error"), f"An unexpected error occurred:\n{e}")
+             logging.exception("Unexpected error during update check.")
+             messagebox.showerror(TXT.get("update_error_title", "Update Error"), f"An unexpected error occurred:\n{e}")
         finally:
-             self.current_action = None # Clear update busy state
-             self._update_progress_ui(None) # Ensure progress bar is hidden
-             self.update_status_bar() # Reset status bar text
+            # --- Cleanup & State Reset ---
+            # No automatic cleanup of Downloads folder needed for this workflow.
+            # Optionally remove the zip after successful extraction if desired.
+            self.current_action = None # Reset update action state
+            self._update_progress_ui(None)
+            self.update_status_bar()
+
 
 # --- Application Entry Point ---
+
 if __name__ == "__main__":
     # --- Initialize Logging ---
     logging.basicConfig(
@@ -1114,81 +1234,87 @@ if __name__ == "__main__":
     logging.info(f"Script path: {SCRIPT_PATH}")
     logging.info(f"Checksum file: {CHECKSUM_FILE}")
 
+    # --- Load Settings & Apply Theme ---
+    current_settings = load_settings()
+    if current_settings.get("dark_mode") is True: ctk.set_appearance_mode("Dark")
+    elif current_settings.get("dark_mode") is False: ctk.set_appearance_mode("Light")
+    else: ctk.set_appearance_mode("System")
+    ctk.set_default_color_theme("blue")
+
+    # --- First Launch Check: Ask about Startup Update Check ---
+    if current_settings.get("check_updates_on_startup") is None:
+        logging.info("First launch detected. Asking about startup update check.")
+        # Need a temporary root for messagebox before main app instance exists
+        temp_root = ctk.CTk(); temp_root.withdraw()
+        user_agrees = messagebox.askyesno(
+            LANGUAGES[LANG].get("ask_enable_startup_update_title", "Automatic Update Check"),
+            LANGUAGES[LANG].get("ask_enable_startup_update_msg", "Enable automatic update checks on startup?")
+        )
+        temp_root.destroy()
+        current_settings["check_updates_on_startup"] = user_agrees
+        save_settings(current_settings) # Save preference immediately
+        logging.info(f"User chose to {'enable' if user_agrees else 'disable'} startup update check.")
+
     # --- Create Main App Instance (Hidden) ---
     app_instance = None
     initialization_ok = False
     try:
-        # Instantiate the main application class (runs __init__)
-        app_instance = CrossOverApp()
-        # Hide the main window immediately
+        app_instance = CrossOverApp() # Reads current_settings internally
         app_instance.withdraw()
-        # Process pending Tk events like withdraw
         app_instance.update_idletasks()
         initialization_ok = True
         logging.info("CrossOverApp instance created and withdrawn.")
     except Exception as init_error:
-        # Handle critical errors during app initialization
         initialization_ok = False
         logging.exception("CRITICAL ERROR during CrossOverApp initialization!")
-        import tkinter as tk; from tkinter import messagebox
+        import tkinter as tk; from tkinter import messagebox # Fallback import
         error_root = tk.Tk(); error_root.withdraw()
         messagebox.showerror("Fatal Error", f"Application failed to initialize:\n{init_error}")
         error_root.destroy(); sys.exit(1)
 
-    # Proceed only if app initialization succeeded
     if initialization_ok and app_instance:
         # --- Create and Display Splash Screen ---
         splash = Toplevel(app_instance)
-
-        # Configure splash window properties
         splash_width, splash_height = 450, 300
         screen_width = app_instance.winfo_screenwidth()
         screen_height = app_instance.winfo_screenheight()
         x_pos = (screen_width // 2) - (splash_width // 2)
         y_pos = (screen_height // 2) - (splash_height // 2)
         splash.geometry(f"{splash_width}x{splash_height}+{x_pos}+{y_pos}")
-        splash.overrideredirect(True) # No window decorations
-        splash.attributes("-topmost", True) # Keep on top
+        splash.overrideredirect(True)
+        splash.attributes("-topmost", True)
 
-        # Create styled frame within the splash window
         current_mode_str = ctk.get_appearance_mode()
         frame_fg_color = COLOR_FRAME_DARK if current_mode_str == "Dark" else COLOR_FRAME_LIGHT
         splash_frame = ctk.CTkFrame(splash, corner_radius=15, border_width=1, fg_color=frame_fg_color)
         splash_frame.pack(expand=True, fill="both", padx=1, pady=1)
 
-        # Add splash content (Logo, Title, Version, Progress Bar)
+        # Splash Content
         try:
-            logo_image = ctk.CTkImage(light_image=Image.open(LOGO_PATH),
-                                     dark_image=Image.open(LOGO_PATH), size=(100, 100))
+            logo_image = ctk.CTkImage(light_image=Image.open(LOGO_PATH), dark_image=Image.open(LOGO_PATH), size=(100, 100))
             ctk.CTkLabel(splash_frame, image=logo_image, text="").pack(pady=(40, 15))
         except Exception as e:
             logging.error(f"Failed to load logo {LOGO_PATH}: {e}")
             ctk.CTkLabel(splash_frame, text=APP_NAME, font=ctk.CTkFont(size=30, weight="bold")).pack(pady=(40, 15))
-
         ctk.CTkLabel(splash_frame, text=APP_NAME, font=ctk.CTkFont(size=20, weight="bold")).pack(pady=5)
         ctk.CTkLabel(splash_frame, text=f"Version {__version__}", font=ctk.CTkFont(size=12)).pack(pady=(0, 25))
         splash_progress = ctk.CTkProgressBar(splash_frame, mode='indeterminate', height=8, corner_radius=4)
-        splash_progress.pack(fill="x", padx=40, pady=(0, 40))
-        splash_progress.start()
-
-        # Force splash to draw
+        splash_progress.pack(fill="x", padx=40, pady=(0, 40)); splash_progress.start()
         splash.update()
         logging.info("Splash screen displayed.")
 
-        # --- Perform Initial Checks (while splash is visible) ---
-        logging.info("Performing initial checks (script status, checksum, service)...")
+        # --- Perform Initial Local Checks (while splash is visible) ---
+        logging.info("Performing initial local checks (script status, checksum, service)...")
         try:
-            # These checks might block briefly or show dialogs
             app_instance._check_script_status()
             app_instance.refresh_status()
-            app_instance.update_status_bar() # Update status bar based on checks
-            logging.info("Initial checks completed.")
+            app_instance.update_status_bar()
+            logging.info("Initial local checks completed.")
         except Exception as check_error:
             logging.exception("Error during initial checks!")
             if splash.winfo_exists(): splash.destroy()
             messagebox.showerror("Initialization Error", f"Failed during initial checks:\n{check_error}")
-            # Decide whether to exit or continue in degraded state
-            # sys.exit(1) # Optional: Exit on check failure
+            # Consider exiting if checks are critical: sys.exit(1)
 
         # --- Define Transition Function ---
         def show_main_window():
@@ -1204,8 +1330,7 @@ if __name__ == "__main__":
             else: logging.warning("Main application window destroyed before showing.")
 
         # --- Schedule Transition ---
-        # Schedule the main window reveal after a minimum splash display time
-        splash_min_duration_ms = 500 # Minimum time splash is visible (ms)
+        splash_min_duration_ms = 500 # Minimum splash display time
         app_instance.after(splash_min_duration_ms, show_main_window)
         logging.info(f"Scheduled main window display in {splash_min_duration_ms} ms.")
 
