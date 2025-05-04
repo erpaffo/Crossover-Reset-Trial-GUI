@@ -39,7 +39,7 @@ jobs:
             --windowed \
             --onedir \
             --icon=icon.icns \
-            --add-data "crack.sh:." \
+            --add-data "script.sh:." \
             main.py
 
       - name: Ad-Hoc Sign the Application
